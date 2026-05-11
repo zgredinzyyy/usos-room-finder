@@ -2,7 +2,6 @@ import os
 import re
 import argparse
 import urllib.request
-import urllib.parse
 import http.cookiejar
 import time
 import sys
@@ -110,19 +109,10 @@ class USOSParser(HTMLParser):
         self.current_building = None
         self.current_room = None
         self.current_day = None
-        self.in_title = False
-        self.in_h1 = False
-        self.in_h4 = False
         
     def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
-        if tag == 'title':
-            self.in_title = True
-        elif tag == 'h1':
-            self.in_h1 = True
-        elif tag == 'h4':
-            self.in_h4 = True
-        elif tag == 'timetable-entry':
+        if tag == 'timetable-entry':
+            attrs_dict = dict(attrs)
             style = attrs_dict.get('style', '')
             start_match = re.search(r'grid-row-start:\s*g(\d{4})', style)
             end_match = re.search(r'grid-row-end:\s*g(\d{4})', style)
@@ -138,32 +128,14 @@ class USOSParser(HTMLParser):
                     self.schedules[key][self.current_day] = []
                 self.schedules[key][self.current_day].append((start_time, end_time))
 
-    def handle_endtag(self, tag):
-        if tag == 'title':
-            self.in_title = False
-        elif tag == 'h1':
-            self.in_h1 = False
-        elif tag == 'h4':
-            self.in_h4 = False
-
     def handle_data(self, data):
         data = data.strip()
         if not data: return
         
-        if self.in_title:
-            m_room = re.search(r'Sala\s+([A-Z0-9-]+)', data)
-            if m_room: self.current_room = m_room.group(1)
-            m_bud = re.search(r'Budynek\s+([A-Z0-9-]+)', data)
-            if m_bud: self.current_building = m_bud.group(1)
-        elif self.in_h4:
+        # Wykrywanie dnia tygodnia w nagłówkach h4
+        # Zakładamy, że parser jest wewnątrz tagu h4 (uproszczenie)
+        if data in ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]:
             self.current_day = data
-        elif self.in_h1:
-            if "Budynek" in data or "budynku" in data:
-                m = re.search(r'[Bb]udynek\s+([A-Z0-9-]+)', data)
-                if m: self.current_building = m.group(1)
-            if "Sala" in data or "sali" in data:
-                m = re.search(r'[Ss]al[ai]\s+([A-Z0-9-]+)', data)
-                if m: self.current_room = m.group(1)
 
     def parse_file(self, file_path):
         self.current_building = None
@@ -177,7 +149,6 @@ class USOSParser(HTMLParser):
             title_match = re.search(r'<title>(.*?)</title>', content, re.DOTALL)
             if title_match:
                 title_text = title_match.group(1)
-                # Szukamy wzorca "Sala X - Budynek Y" lub "Budynek Y"
                 m_room_bud = re.search(r'Sala\s+([A-Z0-9-]+)\s*-\s*Budynek\s+([A-Z0-9-]+)', title_text)
                 if m_room_bud:
                     self.current_room = m_room_bud.group(1)
@@ -187,14 +158,13 @@ class USOSParser(HTMLParser):
                     if m_bud:
                         self.current_building = m_bud.group(1)
 
-            # 2. Wyciąganie sala_id z linków lub skryptów
+            # 2. Wyciąganie sala_id
             if self.current_building and self.current_room:
                 m_sid = re.search(r'sala_id["\']?\s*[:=]\s*["\']?(\d+)["\']?', content)
                 if m_sid:
                     self.room_ids[(self.current_building, self.current_room)] = m_sid.group(1)
 
-            # 3. Wyciąganie pojemności sal (jeśli to widok budynku)
-            # USOS wyświetla tabelę sal dla danego budynku
+            # 3. Wyciąganie pojemności sal
             if self.current_building and not self.current_room:
                 room_matches = re.finditer(r"<td class='strong' style='text-align:center'>([^<]+)</td>\s*<td style='text-align:right'>(\d+)</td>", content)
                 for m in room_matches:
@@ -202,7 +172,6 @@ class USOSParser(HTMLParser):
                     capacity = int(m.group(2))
                     self.rooms[(self.current_building, room_num)] = capacity
                 
-                # Próba wyciągnięcia sala_id z wierszy tabeli
                 rows = re.findall(r'<tr>.*?</tr>', content, re.DOTALL)
                 for row in rows:
                     m_num = re.search(r"<td class='strong'[^>]*>([^<]+)</td>", row)
@@ -210,7 +179,7 @@ class USOSParser(HTMLParser):
                     if m_num and m_id:
                         self.room_ids[(self.current_building, m_num.group(1))] = m_id.group(1)
 
-            # 4. Parsowanie planu zajęć (jeśli to widok sali)
+            # 4. Parsowanie planu zajęć
             self.feed(content)
 
 def time_to_minutes(t_str):
@@ -340,17 +309,14 @@ def main():
     # --- Parsowanie danych ---
     usos = USOSParser()
     files_processed = 0
-    # Przeszukaj zarówno katalog z argumentu, jak i bieżący
-    dirs_to_scan = list(set([args.dir, "."]))
-    for d in dirs_to_scan:
-        if not os.path.exists(d): continue
-        for filename in os.listdir(d):
+    if os.path.exists(args.dir):
+        for filename in os.listdir(args.dir):
             if filename.endswith(".html"):
-                usos.parse_file(os.path.join(d, filename))
+                usos.parse_file(os.path.join(args.dir, filename))
                 files_processed += 1
             
     if files_processed == 0:
-        print(f"Błąd: Nie znaleziono plików HTML. Użyj --building i --cookie, aby pobrać dane.")
+        print(f"Błąd: Nie znaleziono plików HTML w {args.dir}. Użyj --building, aby pobrać dane.")
         return
 
     all_keys = set(usos.rooms.keys()) | set(usos.schedules.keys())
