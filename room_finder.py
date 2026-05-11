@@ -3,27 +3,22 @@ import re
 import argparse
 import urllib.request
 import urllib.parse
-import http.cookiejar
 import time
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
 class USOSScraper:
-    def __init__(self, session_cookie=None, base_url="https://web.usos.agh.edu.pl/"):
+    def __init__(self, base_url="https://web.usos.agh.edu.pl/"):
         self.base_url = base_url
-        self.cj = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
-        self.headers = [
-            ('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
-        ]
-        if session_cookie:
-            self.headers.append(('Cookie', f'PHPSESSID={session_cookie}'))
-        self.opener.addheaders = self.headers
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        }
 
     def fetch_url(self, url):
         print(f"Pobieranie: {url}")
+        req = urllib.request.Request(url, headers=self.headers)
         try:
-            with self.opener.open(url) as response:
+            with urllib.request.urlopen(req) as response:
                 return response.read().decode('utf-8')
         except Exception as e:
             print(f"Błąd podczas pobierania {url}: {e}")
@@ -201,9 +196,9 @@ def main():
     parser.add_argument("--start", help="Godzina rozpoczęcia (GG:MM), np. 12:00", required=True)
     parser.add_argument("--end", help="Godzina zakończenia (GG:MM), np. 14:00", required=True)
     parser.add_argument("--capacity", type=int, default=0, help="Minimalna liczba miejsc")
-    parser.add_argument("--building", help="Kod budynku do sprawdzenia (np. B9, D4)")
+    parser.add_argument("--building", help="Kod budynku lub lista (np. B9, D4)")
     parser.add_argument("--dir", default="data", help="Katalog na pobrane dane (domyślnie 'data')")
-    parser.add_argument("--cookie", help="Wartość ciasteczka PHPSESSID z zalogowanej sesji USOS")
+    parser.add_argument("--renew", action="store_true", help="Wymuś odświeżenie danych (pobierz ponownie)")
     
     args = parser.parse_args()
     
@@ -223,10 +218,9 @@ def main():
     
     # --- Pobieranie danych ---
     if args.building or (not any(f.endswith('.html') for f in os.listdir(args.dir) if os.path.exists(args.dir)) and not args.building):
-        scraper = USOSScraper(session_cookie=args.cookie)
+        scraper = USOSScraper()
         
         if args.building:
-            # Obsługa listy budynków oddzielonej przecinkami
             requested_buildings = [b.strip() for b in args.building.split(',')]
             buildings_to_fetch = []
             for rb in requested_buildings:
@@ -241,29 +235,35 @@ def main():
                 return
 
         for physical_name, bud_id in buildings_to_fetch:
-            print(f"\n--- Pobieranie aktualnych danych dla budynku: {physical_name} (USOS ID: {bud_id}) ---")
-            building_html = scraper.get_building_rooms(bud_id)
-            if building_html:
-                building_cache_file = os.path.join(args.dir, f"building_{bud_id}.html")
-                with open(building_cache_file, "w", encoding="utf-8") as f:
-                    f.write(building_html)
+            building_cache_file = os.path.join(args.dir, f"building_{bud_id}.html")
             
+            if args.renew or not os.path.exists(building_cache_file):
+                print(f"\n--- Pobieranie danych dla budynku: {physical_name} (USOS ID: {bud_id}) ---")
+                building_html = scraper.get_building_rooms(bud_id)
+                if building_html:
+                    with open(building_cache_file, "w", encoding="utf-8") as f:
+                        f.write(building_html)
+            else:
+                with open(building_cache_file, "r", encoding="utf-8") as f:
+                    building_html = f.read()
+
             if building_html:
                 room_ids = re.findall(r'sala_id=(\d+)', building_html)
                 room_ids = list(set(room_ids))
                 
                 new_rooms_fetched = 0
                 for rid in room_ids:
-                    r_html = scraper.get_room_schedule(rid, monday_str)
-                    if r_html:
-                        r_file = os.path.join(args.dir, f"room_{bud_id}_{rid}_{monday_str}.html")
-                        with open(r_file, "w", encoding="utf-8") as f:
-                            f.write(r_html)
-                        new_rooms_fetched += 1
-                        time.sleep(0.2)
+                    r_file = os.path.join(args.dir, f"room_{bud_id}_{rid}_{monday_str}.html")
+                    if args.renew or not os.path.exists(r_file):
+                        r_html = scraper.get_room_schedule(rid, monday_str)
+                        if r_html:
+                            with open(r_file, "w", encoding="utf-8") as f:
+                                f.write(r_html)
+                            new_rooms_fetched += 1
+                            time.sleep(0.2)
                 
                 if new_rooms_fetched > 0:
-                    print(f"Pobrano {new_rooms_fetched} aktualnych planów sal dla {physical_name} (tydzień {monday_str}).")
+                    print(f"Pobrano {new_rooms_fetched} nowych planów sal dla {physical_name} (tydzień {monday_str}).")
     
     # --- Parsowanie danych ---
     usos = USOSParser()
@@ -284,10 +284,14 @@ def main():
     all_keys = set(usos.rooms.keys()) | set(usos.schedules.keys())
     available_rooms = []
     
+    # Przygotuj listę budynków do filtrowania
+    filter_buildings = [b.strip().upper() for b in args.building.split(',')] if args.building else None
+    
     for key in all_keys:
         b_code, r_num = key
         
-        if args.building and b_code.upper() != args.building.upper():
+        # Poprawione filtrowanie: sprawdź czy budynek jest na liście
+        if filter_buildings and b_code.upper() not in filter_buildings:
             continue
             
         capacity = usos.rooms.get(key, 0)
