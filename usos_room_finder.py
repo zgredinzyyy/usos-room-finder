@@ -3,25 +3,59 @@ import re
 import argparse
 import urllib.request
 import urllib.parse
+import http.cookiejar
 import time
+import sys
+import threading
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
+class Spinner:
+    def __init__(self, message="Pobieranie danych..."):
+        self.spinner = ["|", "/", "-", "\\"]
+        self.idx = 0
+        self.message = message
+        self.stop_running = False
+        self.thread = None
+
+    def spin(self):
+        while not self.stop_running:
+            sys.stdout.write(f"\r{self.spinner[self.idx % len(self.spinner)]} {self.message}")
+            sys.stdout.flush()
+            self.idx += 1
+            time.sleep(0.1)
+
+    def start(self):
+        self.thread = threading.Thread(target=self.spin)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_running = True
+        if self.thread:
+            self.thread.join()
+        sys.stdout.write("\r" + " " * (len(self.message) + 2) + "\r")
+        sys.stdout.flush()
+
 class USOSScraper:
-    def __init__(self, base_url="https://web.usos.agh.edu.pl/"):
+    def __init__(self, base_url="https://web.usos.agh.edu.pl/", verbose=False):
         self.base_url = base_url
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        }
+        self.verbose = verbose
+        self.cj = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
+        self.headers = [
+            ('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+        ]
+        self.opener.addheaders = self.headers
 
     def fetch_url(self, url):
-        print(f"Pobieranie: {url}")
-        req = urllib.request.Request(url, headers=self.headers)
+        if self.verbose:
+            print(f"Pobieranie: {url}")
         try:
-            with urllib.request.urlopen(req) as response:
+            with self.opener.open(url) as response:
                 return response.read().decode('utf-8')
         except Exception as e:
-            print(f"Błąd podczas pobierania {url}: {e}")
+            if self.verbose:
+                print(f"Błąd podczas pobierania {url}: {e}")
             return None
 
     def get_building_rooms(self, building_id):
@@ -199,6 +233,7 @@ def main():
     parser.add_argument("--building", help="Kod budynku lub lista (np. B9, D4)")
     parser.add_argument("--dir", default="data", help="Katalog na pobrane dane (domyślnie 'data')")
     parser.add_argument("--renew", action="store_true", help="Wymuś odświeżenie danych (pobierz ponownie)")
+    parser.add_argument("--verbose", action="store_true", help="Wyświetlaj szczegółowe informacje o pobieraniu")
     
     args = parser.parse_args()
     
@@ -212,58 +247,66 @@ def main():
         return
 
     day_name = get_day_of_week_pl(target_date)
-    # Oblicz datę poniedziałku dla USOS (week_sel_week)
     monday_date = target_date - timedelta(days=target_date.weekday())
     monday_str = monday_date.strftime("%Y-%m-%d")
     
     # --- Pobieranie danych ---
     if args.building or (not any(f.endswith('.html') for f in os.listdir(args.dir) if os.path.exists(args.dir)) and not args.building):
-        scraper = USOSScraper()
+        scraper = USOSScraper(verbose=args.verbose)
+        spinner = None
+        if not args.verbose:
+            spinner = Spinner("Pobieranie danych z USOSweb...")
+            spinner.start()
         
-        if args.building:
-            requested_buildings = [b.strip() for b in args.building.split(',')]
-            buildings_to_fetch = []
-            for rb in requested_buildings:
-                bud_id = scraper.find_building_id(rb)
-                buildings_to_fetch.append((rb, bud_id))
-        else:
-            print("Nie podano budynku. Próba pobrania danych dla wszystkich budynków z mapy...")
-            all_ids = scraper.get_all_building_ids()
-            buildings_to_fetch = [(bid, bid) for bid in all_ids]
-            if not buildings_to_fetch:
-                print("Błąd: Nie znaleziono mapa-budynkow.html. Pobierz plik lub podaj --building.")
-                return
-
-        for physical_name, bud_id in buildings_to_fetch:
-            building_cache_file = os.path.join(args.dir, f"building_{bud_id}.html")
-            
-            if args.renew or not os.path.exists(building_cache_file):
-                print(f"\n--- Pobieranie danych dla budynku: {physical_name} (USOS ID: {bud_id}) ---")
-                building_html = scraper.get_building_rooms(bud_id)
-                if building_html:
-                    with open(building_cache_file, "w", encoding="utf-8") as f:
-                        f.write(building_html)
+        try:
+            if args.building:
+                requested_buildings = [b.strip() for b in args.building.split(',')]
+                buildings_to_fetch = []
+                for rb in requested_buildings:
+                    bud_id = scraper.find_building_id(rb)
+                    buildings_to_fetch.append((rb, bud_id))
             else:
-                with open(building_cache_file, "r", encoding="utf-8") as f:
-                    building_html = f.read()
+                if args.verbose: print("Nie podano budynku. Próba pobrania danych dla wszystkich budynków z mapy...")
+                all_ids = scraper.get_all_building_ids()
+                buildings_to_fetch = [(bid, bid) for bid in all_ids]
+                if not buildings_to_fetch:
+                    if spinner: spinner.stop()
+                    print("Błąd: Nie znaleziono mapa-budynkow.html. Pobierz plik lub podaj --building.")
+                    return
 
-            if building_html:
-                room_ids = re.findall(r'sala_id=(\d+)', building_html)
-                room_ids = list(set(room_ids))
+            for physical_name, bud_id in buildings_to_fetch:
+                building_cache_file = os.path.join(args.dir, f"building_{bud_id}.html")
                 
-                new_rooms_fetched = 0
-                for rid in room_ids:
-                    r_file = os.path.join(args.dir, f"room_{bud_id}_{rid}_{monday_str}.html")
-                    if args.renew or not os.path.exists(r_file):
-                        r_html = scraper.get_room_schedule(rid, monday_str)
-                        if r_html:
-                            with open(r_file, "w", encoding="utf-8") as f:
-                                f.write(r_html)
-                            new_rooms_fetched += 1
-                            time.sleep(0.2)
-                
-                if new_rooms_fetched > 0:
-                    print(f"Pobrano {new_rooms_fetched} nowych planów sal dla {physical_name} (tydzień {monday_str}).")
+                if args.renew or not os.path.exists(building_cache_file):
+                    if args.verbose: print(f"\n--- Pobieranie danych dla budynku: {physical_name} (USOS ID: {bud_id}) ---")
+                    building_html = scraper.get_building_rooms(bud_id)
+                    if building_html:
+                        with open(building_cache_file, "w", encoding="utf-8") as f:
+                            f.write(building_html)
+                else:
+                    with open(building_cache_file, "r", encoding="utf-8") as f:
+                        building_html = f.read()
+
+                if building_html:
+                    room_ids = re.findall(r'sala_id=(\d+)', building_html)
+                    room_ids = list(set(room_ids))
+                    
+                    new_rooms_fetched = 0
+                    for rid in room_ids:
+                        r_file = os.path.join(args.dir, f"room_{bud_id}_{rid}_{monday_str}.html")
+                        if args.renew or not os.path.exists(r_file):
+                            r_html = scraper.get_room_schedule(rid, monday_str)
+                            if r_html:
+                                with open(r_file, "w", encoding="utf-8") as f:
+                                    f.write(r_html)
+                                new_rooms_fetched += 1
+                                time.sleep(0.2)
+                    
+                    if args.verbose and new_rooms_fetched > 0:
+                        print(f"Pobrano {new_rooms_fetched} nowych planów sal dla {physical_name} (tydzień {monday_str}).")
+        finally:
+            if spinner:
+                spinner.stop()
     
     # --- Parsowanie danych ---
     usos = USOSParser()
@@ -309,7 +352,6 @@ def main():
             available_rooms.append((b_code, r_num, capacity))
             
     print(f"\nSzukanie wolnych sal: {args.date} ({day_name}) {args.start}-{args.end}")
-    print(f"Analizowany tydzień (plan_week_sel_week): {monday_str}")
     print(f"Wymagana pojemność: >= {args.capacity}")
     if args.building:
         print(f"Budynek: {args.building}")
