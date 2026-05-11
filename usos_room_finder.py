@@ -224,6 +224,31 @@ def get_day_of_week_pl(date_obj):
     days = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]
     return days[date_obj.weekday()]
 
+def cleanup_cache(cache_dir, verbose=False):
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    current_monday = today - timedelta(days=today.weekday())
+    
+    if not os.path.exists(cache_dir):
+        return
+        
+    deleted_count = 0
+    for filename in os.listdir(cache_dir):
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', filename)
+        if match:
+            file_date_str = match.group(1)
+            try:
+                file_date = datetime.strptime(file_date_str, "%Y-%m-%d")
+                if file_date < current_monday:
+                    if verbose:
+                        print(f"Usuwanie starego cache: {filename}")
+                    os.remove(os.path.join(cache_dir, filename))
+                    deleted_count += 1
+            except ValueError:
+                continue
+    
+    if verbose and deleted_count > 0:
+        print(f"Usunięto {deleted_count} starych plików cache.")
+
 def main():
     parser = argparse.ArgumentParser(description="USOS Room Finder - Znajdź wolną salę.")
     parser.add_argument("--date", help="Data (DD-MM-RRRR), np. 11-05-2026", required=True)
@@ -234,11 +259,15 @@ def main():
     parser.add_argument("--dir", default="data", help="Katalog na pobrane dane (domyślnie 'data')")
     parser.add_argument("--renew", action="store_true", help="Wymuś odświeżenie danych (pobierz ponownie)")
     parser.add_argument("--verbose", action="store_true", help="Wyświetlaj szczegółowe informacje o pobieraniu")
+    parser.add_argument("--no-cleanup", action="store_true", help="Wyłącz automatyczne czyszczenie starego cache'u")
     
     args = parser.parse_args()
     
     if not os.path.exists(args.dir):
         os.makedirs(args.dir)
+
+    if not args.no_cleanup:
+        cleanup_cache(args.dir, verbose=args.verbose)
 
     try:
         target_date = datetime.strptime(args.date, "%d-%m-%Y")
