@@ -172,12 +172,12 @@ class USOSParser(HTMLParser):
                     capacity = int(m.group(2))
                     self.rooms[(self.current_building, room_num)] = capacity
                 
-                rows = re.findall(r'<tr>.*?</tr>', content, re.DOTALL)
+                rows = re.findall(r'<tr[^>]*>.*?</tr>', content, re.DOTALL)
                 for row in rows:
-                    m_num = re.search(r"<td class='strong'[^>]*>([^<]+)</td>", row)
+                    m_num = re.search(r"<td class='strong'[^>]*>\s*([^<]+?)\s*</td>", row)
                     m_id = re.search(r'sala_id=(\d+)', row)
                     if m_num and m_id:
-                        self.room_ids[(self.current_building, m_num.group(1))] = m_id.group(1)
+                        self.room_ids[(self.current_building, m_num.group(1).strip())] = m_id.group(1)
 
             # 4. Parsowanie planu zajęć
             self.feed(content)
@@ -312,8 +312,10 @@ def main():
     if os.path.exists(args.dir):
         for filename in os.listdir(args.dir):
             if filename.endswith(".html"):
-                usos.parse_file(os.path.join(args.dir, filename))
-                files_processed += 1
+                # Tylko pliki budynków lub pliki sal z poprawnego tygodnia
+                if filename.startswith("building_") or (filename.startswith("room_") and monday_str in filename):
+                    usos.parse_file(os.path.join(args.dir, filename))
+                    files_processed += 1
             
     if files_processed == 0:
         print(f"Błąd: Nie znaleziono plików HTML w {args.dir}. Użyj --building, aby pobrać dane.")
