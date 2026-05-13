@@ -6,6 +6,8 @@ import http.cookiejar
 import time
 import sys
 import threading
+import json
+import csv
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
 
@@ -229,6 +231,8 @@ def main():
     parser.add_argument("--renew", action="store_true", help="Wymuś odświeżenie danych (pobierz ponownie)")
     parser.add_argument("--verbose", action="store_true", help="Wyświetlaj szczegółowe informacje o pobieraniu")
     parser.add_argument("--no-cleanup", action="store_true", help="Wyłącz automatyczne czyszczenie starego cache'u")
+    parser.add_argument("--csv", action="store_true", help="Wyświetl wyniki w formacie CSV")
+    parser.add_argument("--json", action="store_true", help="Wyświetl wyniki w formacie JSON")
     
     args = parser.parse_args()
     
@@ -347,30 +351,60 @@ def main():
         
         if is_free:
             available_rooms.append((b_code, r_num, capacity))
-            
-    print(f"\nSzukanie wolnych sal: {args.date} ({day_name}) {args.start}-{args.end}")
-    print(f"Wymagana pojemność: >= {args.capacity}")
-    if args.building:
-        print(f"Budynek: {args.building}")
-    print("-" * 40)
-    
+
     if not available_rooms:
-        print("Nie znaleziono dostępnych sal spełniających kryteria.")
+        if not args.csv and not args.json:
+            print("Nie znaleziono dostępnych sal spełniających kryteria.")
     else:
         # Sortowanie po budynku i numerze sali (z naturalnym sortowaniem dla numerów)
         def natural_sort_key(s):
             return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
         available_rooms.sort(key=lambda x: (x[0], natural_sort_key(x[1])))
-        print(f"{'Budynek':<10} {'Sala':<10} {'Miejsca':<10} {'Link USOS'}")
-        print("-" * 100)
-        for b, r, c in available_rooms:
-            cap_str = str(c) if c > 0 else "???"
-            s_id = usos.room_ids.get((b, r))
-            link = f"https://web.usos.agh.edu.pl/kontroler.php?_action=katalog2/jednostki/pokazSale&sala_id={s_id}&plan_week_sel_week={monday_str}" if s_id else "---"
-            print(f"{b:<10} {r:<10} {cap_str:<10} {link}")
-        print("-" * 100)
-        print(f"Znaleziono {len(available_rooms)} wolnych sal.")
+
+    # Przygotowanie danych do exportu
+    export_data = []
+    for b, r, c in available_rooms:
+        s_id = usos.room_ids.get((b, r))
+        link = f"https://web.usos.agh.edu.pl/kontroler.php?_action=katalog2/jednostki/pokazSale&sala_id={s_id}&plan_week_sel_week={monday_str}" if s_id else ""
+        export_data.append({
+            "building": b,
+            "room": r,
+            "capacity": c,
+            "link": link
+        })
+
+    if args.json:
+        print(json.dumps(export_data, indent=2, ensure_ascii=False))
+        return
+
+    if args.csv:
+        if export_data:
+            writer = csv.DictWriter(sys.stdout, fieldnames=export_data[0].keys())
+            writer.writeheader()
+            writer.writerows(export_data)
+        return
+
+    if not args.csv and not args.json:
+        print(f"\nSzukanie wolnych sal: {args.date} ({day_name}) {args.start}-{args.end}")
+        print(f"Wymagana pojemność: >= {args.capacity}")
+        if args.building:
+            print(f"Budynek: {args.building}")
+        print("-" * 40)
+    
+    if not available_rooms:
+        if not args.csv and not args.json:
+            print("Nie znaleziono dostępnych sal spełniających kryteria.")
+    else:
+        if not args.csv and not args.json:
+            print(f"{'Budynek':<10} {'Sala':<10} {'Miejsca':<10} {'Link USOS'}")
+            print("-" * 100)
+            for row in export_data:
+                cap_str = str(row["capacity"]) if row["capacity"] > 0 else "???"
+                link_str = row["link"] if row["link"] else "---"
+                print(f"{row['building']:<10} {row['room']:<10} {cap_str:<10} {link_str}")
+            print("-" * 100)
+            print(f"Znaleziono {len(available_rooms)} wolnych sal.")
 
 if __name__ == "__main__":
     main()
