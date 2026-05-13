@@ -357,7 +357,11 @@ def main():
     if not available_rooms:
         print("Nie znaleziono dostępnych sal spełniających kryteria.")
     else:
-        available_rooms.sort(key=lambda x: (x[0], x[2]))
+        # Sortowanie po budynku i numerze sali (z naturalnym sortowaniem dla numerów)
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
+        available_rooms.sort(key=lambda x: (x[0], natural_sort_key(x[1])))
         print(f"{'Budynek':<10} {'Sala':<10} {'Miejsca':<10} {'Link USOS'}")
         print("-" * 100)
         for b, r, c in available_rooms:
